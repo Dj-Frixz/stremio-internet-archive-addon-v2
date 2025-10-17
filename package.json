@@ -1,0 +1,32 @@
+{
+  "name": "stremio-internet-archive-addon-v2",
+  "version": "1.0.0",
+  "description": "See if a movie is available on Internet Archive and play it instantly, directly from Stremio.",
+  "keywords": [
+    "stremio",
+    "internet-archive",
+    "archive-org",
+    "movie",
+    "movies",
+    "streaming"
+  ],
+  "homepage": "https://2c2fdd5f9c5b-stremio-internet-archive-addon.baby-beamup.club/",
+  "bugs": {
+    "url": "https://github.com/Dj-Frixz/stremio-internet-archive-addon/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Dj-Frixz/stremio-internet-archive-addon.git"
+  },
+  "license": "ISC",
+  "author": "Dj Frixz",
+  "type": "commonjs",
+  "main": "addon.js",
+  "scripts": {
+    "test": "npm start -- --launch",
+    "update": "git pull && npm ci && git commit . && git push beamup main"
+  },
+  "dependencies": {
+    "stremio-addon-sdk": "1.0.x"
+  }
+}

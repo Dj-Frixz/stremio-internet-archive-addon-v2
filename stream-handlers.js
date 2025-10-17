@@ -32,14 +32,14 @@ async function fetchMovieStreams(id) {
         'item_size:["300000000" TO "100000000000"]' // size between ~300MB and ~100GB
     ];
     const iaUrl = `https://archive.org/services/search/beta/page_production/?user_query=${encodeURIComponent(queryParts.join(' AND '))}&sort=week:desc&hits_per_page=${MAX_STREAMS}`;
-    // console.log(iaUrl);
+    // // console.log(iaUrl);
     const iaResponse = await fetch(iaUrl);
     if (!iaResponse.ok) {
         return { streams: [] };
     }
     const iaData = await iaResponse.json();
     const results = iaData?.response?.body?.hits?.hits || [];
-    console.log(`Found ${results.length} results on IA for ${film.name} (${imdbId})`);
+    // console.log(`Found ${results.length} results on IA for ${film.name} (${imdbId})`);
     let streams = [];
     let counter = 0;
     for (const res of results) {
@@ -55,7 +55,7 @@ async function fetchMovieStreams(id) {
         const videoFiles = files.filter(f => ACCEPTED_FILE_TYPES.includes(f.name.slice(-3).toLowerCase()) && f.length > runtime*0.7);
         
         if (videoFiles.length === 0) {
-            console.log(` - ${id} has no acceptable video files, skipping`);
+            // console.log(` - ${id} has no acceptable video files, skipping`);
             continue;
         }
 
@@ -93,11 +93,11 @@ async function fetchMovieStreams(id) {
         //         }
         //     }))
         // );
-        console.log(` - ${id} (${streams.length - counter} streams)`);
+        // console.log(` - ${id} (${streams.length - counter} streams)`);
         counter = streams.length;
     }
-    console.log(` -> Returning ${streams.length} streams`);
-    // console.log(streams); // used for debugging
+    // console.log(` -> Returning ${streams.length} streams`);
+    // // console.log(streams); // used for debugging
     return { streams: streams }
 }
 
@@ -115,7 +115,7 @@ async function fetchSeriesStreams(id) {
         .replace(/\(.*\)/g,'') // remove anything in parentheses
         // .replace(/[^a-z0-9]/g,'') // remove non-alphanumeric characters
         .trim(); // remove leading/trailing spaces
-    console.log(epName);
+    // console.log(epName);
 
     const queryParts = [
         `(title:(${series.name.toLowerCase()}) OR title:(${epName.toLowerCase()}))`, // lowercase to avoid known ia bug with "TO" in title
@@ -124,7 +124,7 @@ async function fetchSeriesStreams(id) {
         '(series OR collection:(television OR unsorted_television))' // filter to TV shows only
     ];
     const iaUrl = `https://archive.org/services/search/beta/page_production/?user_query=${encodeURIComponent(queryParts.join(' AND '))}&hits_per_page=${MAX_STREAMS_SERIES}`;
-    console.log(iaUrl);
+    // console.log(iaUrl);
     const iaResponse = await fetch(iaUrl);
     if (!iaResponse.ok) {
         console.error('Internet Archive error:', iaResponse.status, iaResponse.statusText);
@@ -132,13 +132,13 @@ async function fetchSeriesStreams(id) {
     }
     const iaData = await iaResponse.json();
     const results = iaData?.response?.body?.hits?.hits || [];
-    console.log(`Found ${results.length} results on IA for ${series.name}, ${season}x${ep} (${imdbId})`);
+    // console.log(`Found ${results.length} results on IA for ${series.name}, ${season}x${ep} (${imdbId})`);
     let streams = [];
     let counter = 0;
     const epNameRegex = new RegExp('.*'+ // find ref to episode name in file names
         epName.replace(/[^a-z0-9]/ig,'.*') + '.*','i');
 
-    console.log(epNameRegex);
+    // console.log(epNameRegex);
     for (const res of results) {
         const id = res.fields.identifier;
         let regex;
@@ -166,7 +166,7 @@ async function fetchSeriesStreams(id) {
         );
         
         if (videoFiles.length === 0) {
-            console.log(` - ${id} doesn't have S0${season}xE${ep}, skipping`);
+            // console.log(` - ${id} doesn't have S0${season}xE${ep}, skipping`);
             continue;
         }
 
@@ -204,11 +204,11 @@ async function fetchSeriesStreams(id) {
         //         }
         //     }))
         // );
-        console.log(` - ${id} (${streams.length - counter} streams)`);
+        // console.log(` - ${id} (${streams.length - counter} streams)`);
         counter = streams.length;
     }
-    console.log(` -> Returning ${streams.length} streams`);
-    // console.log(streams); // used for debugging
+    // console.log(` -> Returning ${streams.length} streams`);
+    // // console.log(streams); // used for debugging
     return { streams: streams }
 }
 

@@ -6,6 +6,7 @@ const MAX_STREAMS_SERIES = 15;
 const sizeToString = bytes => bytes >= 1073741824 ? `${(bytes/1073741824).toFixed(1)}GB` : `${(bytes/1048576).toFixed(0)}MB`;
 
 async function fetchMovieStreams(id) {
+    console.log(id);
     const imdbId = id;
     const cinemetaUrl = `https://v3-cinemeta.strem.io/meta/movie/${imdbId}.json`;
     const cinemetaResponse = await fetch(cinemetaUrl);
@@ -98,6 +99,8 @@ async function fetchMovieStreams(id) {
     }
     // console.log(` -> Returning ${streams.length} streams`);
     // // console.log(streams); // used for debugging
+    const identifier = streams?.[0]?.url?.split('/')?.[4] || '';
+    console.log(`{"id": "${imdbId}", "name": "${film.name}", "identifier": "${identifier}", "type": "movie"}`);
     return { streams: streams }
 }
 
@@ -209,6 +212,8 @@ async function fetchSeriesStreams(id) {
     }
     // console.log(` -> Returning ${streams.length} streams`);
     // // console.log(streams); // used for debugging
+    const identifier = streams?.[0]?.url?.split('/')?.[4] || '';
+    console.log(`{"id": "${imdbId}", "name": "${series.name}", "identifier": "${identifier}", "type": "series"}`);
     return { streams: streams }
 }
 

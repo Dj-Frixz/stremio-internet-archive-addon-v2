@@ -18,5 +18,16 @@ const { fetchMovieStreams, fetchSeriesStreams } = require('../stream-handlers');
         console.log(`${res ? 'PASS' : 'FAIL'} - ${test.type} "${test.name}" (id: ${test.id}, identifier: ${test.identifier})`);
         return res;
     }));
-    console.log(`${results.filter(r => r).length}/${results.length} tests passed.`);
-})
+    const notPassed = results.filter(r => !r).length;
+    if (notPassed === 0) {
+        process.exit(0); // pass
+    } else {
+        console.warn(`${notPassed}/${results.length} tests failed.`);
+        for (const i = 0; i < results.length; i++) {
+            if (!results[i]) {
+                console.warn(` - "${tests[i].name}" (id: ${tests[i].id}, identifier: ${tests[i].identifier}) failed.`);
+            }
+        }
+        process.exit(1); // fail
+    }
+})()

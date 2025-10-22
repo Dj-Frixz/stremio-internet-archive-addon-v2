@@ -112,7 +112,7 @@ async function fetchSeriesStreams(id) {
     }
     const series = (await cinemetaResponse.json())?.meta;
     const episode = series.videos.find(e => e.season == season && e.episode == ep);
-    const epName = episode.name.replace(/^the /i,'') // remove 'the' at start
+    const epName = (episode.name || episode.title).replace(/^the /i,'') // remove 'the' at start
         .replace(/\W*part\W*[0-9IVX]+\W*/i,' ') // remove 'part x' from episode name
         .replace(/\(.*\)/g,'') // remove anything in parentheses
         // .replace(/[^a-z0-9]/g,'') // remove non-alphanumeric characters

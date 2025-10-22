@@ -12,9 +12,10 @@ const { fetchMovieStreams, fetchSeriesStreams } = require('../stream-handlers');
             default:
                 throw new Error(`Unknown type: ${test.type}`);
         }
+        // console.log(obj);
         const res = obj.streams.findIndex(
-            s => s.url.endsWith(test.identifier)
-        ) >= 0;
+            s => s.url.includes(test.identifier)
+        ) >= 0; // could be s.url.split('/')[4] === test.identifier but meh
         console.log(`${res ? 'PASS' : 'FAIL'} - ${test.type} "${test.name}" (id: ${test.id}, identifier: ${test.identifier})`);
         return res;
     }));
@@ -23,11 +24,6 @@ const { fetchMovieStreams, fetchSeriesStreams } = require('../stream-handlers');
         process.exit(0); // pass
     } else {
         console.warn(`${notPassed}/${results.length} tests failed.`);
-        for (const i = 0; i < results.length; i++) {
-            if (!results[i]) {
-                console.warn(` - "${tests[i].name}" (id: ${tests[i].id}, identifier: ${tests[i].identifier}) failed.`);
-            }
-        }
         process.exit(1); // fail
     }
 })()

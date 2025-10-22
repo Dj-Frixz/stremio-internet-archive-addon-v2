@@ -1,7 +1,11 @@
-const tests = require('./tests.json');
+let tests = require('./tests.json');
 const { fetchMovieStreams, fetchSeriesStreams } = require('../stream-handlers');
 
 (async () => {
+    const args = process.argv.slice(2);
+    if (args.length > 0) {
+        tests = args.map(i => tests[parseInt(i)]);
+    }
     const results = await Promise.all(tests.map(async (test) => {
         let obj;
         switch (test.type) {

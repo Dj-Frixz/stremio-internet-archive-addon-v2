@@ -98,6 +98,8 @@ async function fetchMovieStreams(id) {
     }
     // console.log(` -> Returning ${streams.length} streams`);
     // // console.log(streams); // used for debugging
+    // const identifier = streams?.[0]?.url?.split('/')?.[4] || '';
+    // console.log(`{"id": "${imdbId}", "name": "${film.name}", "identifier": "${identifier}", "type": "movie"}`);
     return { streams: streams }
 }
 
@@ -209,6 +211,8 @@ async function fetchSeriesStreams(id) {
     }
     // console.log(` -> Returning ${streams.length} streams`);
     // // console.log(streams); // used for debugging
+    // const identifier = streams?.[0]?.url?.split('/')?.[4] || '';
+    // console.log(`{"id": "${imdbId}", "name": "${series.name}", "identifier": "${identifier}", "type": "series"}`);
     return { streams: streams }
 }
 

@@ -20,7 +20,13 @@ const { fetchMovieStreams, fetchSeriesStreams } = require('../stream-handlers');
         const res = obj.streams.findIndex(
             s => s.url.includes(test.identifier)
         ) >= 0; // could be s.url.split('/')[4] === test.identifier but meh
-        console.log(`${res ? 'PASS' : 'FAIL'} - ${test.type} "${test.name}" (id: ${test.id}, identifier: ${test.identifier})`);
+        console.log(`${res ? 'PASS' : 'FAIL'} - "${test.name}"`);
+        if (!res) {
+            console.log('  Expected to find:', test.identifier);
+            console.log('  In streams:', obj.streams.length>0 ? 
+                obj.streams.map(s => s.url.split('/')[4]).join(',\n             ') : 
+                '<no streams found>');
+        }
         return res;
     }));
     const notPassed = results.filter(r => !r).length;

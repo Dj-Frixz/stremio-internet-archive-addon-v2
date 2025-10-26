@@ -3,9 +3,9 @@ const { fetchMovieStreams, fetchSeriesStreams } = require('./stream-handlers');
 const pkg = require('./package');
 
 const builder = new addonBuilder({
-    id: 'org.stremio.internet-archive-v2',
+    id: 'org.stremio.internet-archive',
     version: pkg.version,
-    name: 'Internet Archive 2',
+    name: 'Internet Archive',
     description: pkg.description,
     catalogs: [], // { type: 'movie', id: 'ia', name: 'Internet Archive' }
     resources: ['stream'],

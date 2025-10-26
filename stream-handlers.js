@@ -125,6 +125,8 @@ async function fetchSeriesStreams(id) {
         'mediatype:movies', // videos only ('movies' on archive.org includes TV shows)
         '(series OR collection:(television OR unsorted_television))' // filter to TV shows only
     ];
+    if (series.genres.includes('Soap')) {
+        queryParts[0] = 
     const iaUrl = `https://archive.org/services/search/beta/page_production/?user_query=${encodeURIComponent(queryParts.join(' AND '))}&hits_per_page=${MAX_STREAMS_SERIES}`;
     // console.log(iaUrl);
     const iaResponse = await fetch(iaUrl);

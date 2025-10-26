@@ -1,6 +1,6 @@
 {
   "name": "stremio-internet-archive-addon",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "See if a movie is available on Internet Archive and play it instantly, directly from Stremio.",
   "keywords": [
     "stremio",

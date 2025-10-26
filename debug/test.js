@@ -10,9 +10,9 @@ const { fetchMovieStreams, fetchSeriesStreams } = require('../stream-handlers');
         let obj;
         switch (test.type) {
             case 'movie':
-                obj = await fetchMovieStreams(test.id);break;
+                obj = await fetchMovieStreams(test.id, {query:true});break;
             case 'series':
-                obj = await fetchSeriesStreams(test.id);break;
+                obj = await fetchSeriesStreams(test.id, {query:true});break;
             default:
                 throw new Error(`Unknown type: ${test.type}`);
         }

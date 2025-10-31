@@ -24,7 +24,7 @@ async function fetchMovieStreams(id, log = {test:false, query:false}) {
         if (!cinemetaResponse.ok) {
             return { streams: [] };
         }
-        throw new Error('Test ERrorrrasirjaiojraioj.')
+        throw new Error('Test.');
         const film = (await cinemetaResponse.json())?.meta;
         if (!film) {
             return { streams: [] };
@@ -118,6 +118,7 @@ async function fetchMovieStreams(id, log = {test:false, query:false}) {
         return { streams: streams }
     } catch (err) {
         streams = errorStream(err); // return a stream result with the error
+        console.error('Error fetching movie '+id+' ('+streams[0]?.description+')');
     } finally {
         return { streams: streams }
     }
@@ -247,6 +248,7 @@ async function fetchSeriesStreams(id, log = {test:false, query:false}) {
         }
     } catch (err) {
         streams = errorStream(err); // return a stream result with the error
+        console.error('Error fetching movie '+id+' ('+streams[0]?.description+')');
     } finally {
         return { streams: streams };
     }

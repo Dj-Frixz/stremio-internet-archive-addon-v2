@@ -168,7 +168,7 @@ async function fetchSeriesStreams(cinemetaID, log = {test:false, query:false}) {
         }
         const iaData = await iaResponse.json();
         let results = iaData?.response?.body?.hits?.hits || [];
-        if (results.length === 0) { // try again with a more relaxed query
+        if (results.length < MAX_STREAMS_SERIES) { // try again with a more relaxed query
             queryParts[0] = `title:("${sMatchName}" OR *${sMatchName}*)`; // try without season in title
             if (log.query) console.log(queryParts.join(' AND '));
             const iaUrlAlt = `https://archive.org/services/search/beta/page_production/?user_query=${encodeURIComponent(queryParts.join(' AND '))}&hits_per_page=${MAX_STREAMS_SERIES}`;
@@ -178,7 +178,7 @@ async function fetchSeriesStreams(cinemetaID, log = {test:false, query:false}) {
                 throw new Error("Internet Archive responded with code "+iaResponseAlt.status);
             }
             const iaDataAlt = await iaResponseAlt.json();
-            results = iaDataAlt?.response?.body?.hits?.hits || [];
+            results = results.concat(iaDataAlt?.response?.body?.hits?.hits || []);
         }
         // console.log(`Found ${results.length} results on IA for ${series.name}, ${season}x${ep} (${imdbId})`);
         // let counter = 0;

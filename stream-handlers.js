@@ -1,7 +1,7 @@
 const ACCEPTED_FILE_TYPES = ['avi', 'mp4', 'mkv', 'wmv', 'mov', 'm4v'];
 const ACCEPTED_SUBTITLES = ['srt', 'vtt', 'ass'];
 const MAX_STREAMS = 5;
-const MAX_STREAMS_SERIES = 3;
+const MAX_STREAMS_SERIES = 5;
 // this function converts number of bytes to a string ending in MB or GB
 const sizeToString = bytes => bytes >= 1073741824 ? `${(bytes/1073741824).toFixed(1)}GB` : `${(bytes/1048576).toFixed(0)}MB`;
 
@@ -168,7 +168,7 @@ async function fetchSeriesStreams(cinemetaID, log = {test:false, query:false}) {
         }
         const iaData = await iaResponse.json();
         let results = iaData?.response?.body?.hits?.hits || [];
-        if (results.length === 0) { // try again with a more relaxed query
+        if (results.length < MAX_STREAMS_SERIES) { // try again with a more relaxed query
             queryParts[0] = `title:("${sMatchName}" OR *${sMatchName}*)`; // try without season in title
             if (log.query) console.log(queryParts.join(' AND '));
             const iaUrlAlt = `https://archive.org/services/search/beta/page_production/?user_query=${encodeURIComponent(queryParts.join(' AND '))}&hits_per_page=${MAX_STREAMS_SERIES}`;
@@ -178,7 +178,7 @@ async function fetchSeriesStreams(cinemetaID, log = {test:false, query:false}) {
                 throw new Error("Internet Archive responded with code "+iaResponseAlt.status);
             }
             const iaDataAlt = await iaResponseAlt.json();
-            results = iaDataAlt?.response?.body?.hits?.hits || [];
+            results = results.concat(iaDataAlt?.response?.body?.hits?.hits || []);
         }
         // console.log(`Found ${results.length} results on IA for ${series.name}, ${season}x${ep} (${imdbId})`);
         // let counter = 0;

@@ -8,5 +8,6 @@
     {"id": "tt0103584:0:0", "name": "X-Men", "identifier": "pryde-of-the-x-men_202404", "type": "series"},
     {"id": "tt0093336", "name": "The Cat", "identifier": "dominik-graf-1988-the-cat", "type": "movie"},
     {"id": "tt0058796:61:4", "name":"Days of Our Lives", "identifier":"days-of-our-lives-august-25-29-2025", "type":"series"},
-    {"id": "tt0773264:8:61", "name": "House of Payne", "identifier": "houseofpaynetbs-fullepisodes", "type": "series"}
+    {"id": "tt0773264:8:61", "name": "House of Payne", "identifier": "houseofpaynetbs-fullepisodes", "type": "series"},
+    {"id": "tt0220880:1:1", "name": "Courage the Cowardly Dog", "identifier": "s-1-e-03-.-courage-meets-big-foot-hothead", "type": "series"}
 ]

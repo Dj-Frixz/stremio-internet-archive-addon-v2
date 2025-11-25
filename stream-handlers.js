@@ -1,7 +1,7 @@
 const ACCEPTED_FILE_TYPES = ['avi', 'mp4', 'mkv', 'wmv', 'mov', 'm4v'];
 const ACCEPTED_SUBTITLES = ['srt', 'vtt', 'ass'];
 const MAX_STREAMS = 5;
-const MAX_STREAMS_SERIES = 3;
+const MAX_STREAMS_SERIES = 5;
 // this function converts number of bytes to a string ending in MB or GB
 const sizeToString = bytes => bytes >= 1073741824 ? `${(bytes/1073741824).toFixed(1)}GB` : `${(bytes/1048576).toFixed(0)}MB`;
 

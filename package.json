@@ -24,6 +24,7 @@
   "main": "addon.js",
   "scripts": {
     "test": "npm start -- --launch",
+    "test:ci": "node --test debug/addon.test.js",
     "update": "git pull && npm ci && git commit . && git push beamup main",
     "autotest": "node debug/test.js"
   },

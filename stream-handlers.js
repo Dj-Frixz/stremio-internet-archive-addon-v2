@@ -78,15 +78,18 @@ function formatStreamName(sourceTitle, qualityTag, fileMeta) {
 
 async function limitedFetchJson(url, options = {}) {
     try {
-        const res = await schedule(() => fetch(url, { dispatcher, ...options }));
-        if (!res.ok) {
-            increment('upstreamErrors');
-            return null;
-        }
-        return res.json();
+        return await schedule(async () => {
+            const res = await fetch(url, { dispatcher, signal: AbortSignal.timeout(20_000), ...options });
+            if (!res.ok) {
+                await res.body?.cancel();
+                throw new Error(`HTTP ${res.status}`);
+            }
+            return res.json();
+        });
     } catch (err) {
         increment('upstreamErrors');
-        console.warn('[fetch]', url, err?.message || err);
+        const { origin, pathname } = new URL(url);
+        console.warn('[fetch]', origin + pathname, err?.message || err);
         return null;
     }
 }
@@ -101,7 +104,8 @@ async function getCinemetaMeta(type, id) {
 async function searchArchive(queryKey, url) {
     return deduped(`archive:search:${queryKey}`, async () => {
         const json = await limitedFetchJson(url);
-        return json?.response?.body?.hits?.hits || [];
+        const hits = json?.response?.body?.hits?.hits;
+        return Array.isArray(hits) ? hits : null;
     });
 }
 
@@ -115,7 +119,8 @@ async function getArchiveFiles(identifier) {
     }
     return deduped(`archive:files:${identifier}`, async () => {
         const json = await limitedFetchJson(`https://archive.org/metadata/${identifier}/files`);
-        const files = json?.result || [];
+        const files = json?.result;
+        if (!Array.isArray(files)) return null;
         if (CACHE_ENABLED) {
             await cacheSet(cacheKey, files, files.length ? ARCHIVE_FILES_TTL : ARCHIVE_FILES_EMPTY_TTL);
         }
@@ -144,10 +149,19 @@ async function getCachedResponse(cacheKey) {
     return { data: entry, cachedAt: entry.cachedAt || 0 };
 }
 
-async function storeResponse(cacheKey, payload, ttlOverride) {
+async function storeResponse(cacheKey, payload) {
     if (!CACHE_ENABLED) return;
-    const ttl = jitter(ttlOverride || ttlForPayload(payload));
+    const ttl = jitter(ttlForPayload(payload));
     await cacheSet(cacheKey, { data: payload, cachedAt: Date.now() }, ttl);
+}
+
+function rebuildResponse(cacheKey, builder) {
+    return deduped(`build:${cacheKey}`, async () => {
+        const { streams, complete } = await builder();
+        const response = { streams };
+        if (complete) await storeResponse(cacheKey, response);
+        return response;
+    });
 }
 
 function maybeRevalidate(cacheKey, cachedAt, builder) {
@@ -157,8 +171,7 @@ function maybeRevalidate(cacheKey, cachedAt, builder) {
     refreshingKeys.add(cacheKey);
     setImmediate(async () => {
         try {
-            const fresh = await builder();
-            await storeResponse(cacheKey, fresh);
+            await rebuildResponse(cacheKey, builder);
         } catch (err) {
             console.warn('[cache] background refresh failed for', cacheKey, err?.message || err);
         } finally {
@@ -170,7 +183,7 @@ function maybeRevalidate(cacheKey, cachedAt, builder) {
 async function buildMovieStreams(imdbId, log = { test: false, query: false }) {
     const film = await getCinemetaMeta('movie', imdbId);
     if (!film) {
-        return { streams: [] };
+        return { streams: [], complete: false };
     }
     const title = film.name.toLowerCase().replace(/^the /i, '');
     const runtimeMinutes = parseInt(film?.runtime, 10) || 0;
@@ -190,10 +203,16 @@ async function buildMovieStreams(imdbId, log = { test: false, query: false }) {
     if (log.query) console.log(queryParts.join(' AND '));
     const iaUrl = `https://archive.org/services/search/beta/page_production/?user_query=${encodeURIComponent(queryParts.join(' AND '))}&sort=week:desc&hits_per_page=${MAX_STREAMS}`;
     const results = await searchArchive(`movie:${imdbId}`, iaUrl);
+    if (results === null) return { streams: [], complete: false };
     const streams = [];
+    let complete = true;
     for (const res of results) {
         const identifier = res.fields.identifier;
         const files = await getArchiveFiles(identifier);
+        if (files === null) {
+            complete = false;
+            continue;
+        }
         const subtitles = files
             .filter((f) => ACCEPTED_SUBTITLES.includes(f.name.slice(-3).toLowerCase()))
             .map((f) => ({ id: f.name, url: `https://archive.org/download/${identifier}/${f.name}`, lang: 'en' }));
@@ -237,26 +256,25 @@ async function buildMovieStreams(imdbId, log = { test: false, query: false }) {
             })
         );
     }
-    const response = { streams };
     if (log.test) {
         const identifier = streams?.[0]?.url?.split('/')?.[4] || '';
         console.log(`{"id": "${imdbId}", "name": "${film.name}", "identifier": "${identifier}", "type": "movie"}`);
     }
-    return response;
+    return { streams, complete };
 }
 
 async function buildSeriesStreams(id, log = { test: false, query: false }) {
     const [imdbId, season, ep] = id.split(':');
     const series = await getCinemetaMeta('series', imdbId);
     if (!series) {
-        return { streams: [] };
+        return { streams: [], complete: false };
     }
     const seasonNumber = parseInt(season, 10) || undefined;
     const episodeNumber = parseInt(ep, 10) || undefined;
     const sMatchName = series.name.toLowerCase().replace(/\W/g, '*');
     const episode = series.videos?.find((e) => e.season == season && e.episode == ep);
     if (!episode) {
-        return { streams: [] };
+        return { streams: [], complete: true };
     }
     const epName = (episode.name || episode.title)
         .replace(/^the /i, '')
@@ -277,8 +295,10 @@ async function buildSeriesStreams(id, log = { test: false, query: false }) {
     if (log.query) console.log(queryParts.join(' AND '));
     const iaUrl = `https://archive.org/services/search/beta/page_production/?user_query=${encodeURIComponent(queryParts.join(' AND '))}&hits_per_page=${MAX_STREAMS_SERIES}`;
     const results = await searchArchive(`series:${imdbId}:${season}:${ep}`, iaUrl);
+    if (results === null) return { streams: [], complete: false };
     const epNameRegex = new RegExp('.*' + epName.replace(/[^a-z0-9]/gi, '.*') + '.*', 'i');
     const streams = [];
+    let complete = true;
     for (const res of results) {
         const identifier = res.fields.identifier;
         const wrongSeason = new RegExp(`(?:(?:^|[^a-z])s|season)\\D?0*(?!${season}(?:\\D|$))\\d+`, 'i');
@@ -290,6 +310,10 @@ async function buildSeriesStreams(id, log = { test: false, query: false }) {
             regex = new RegExp(`s(?:eason)?\\D?0*${season}\\D*(?:ep?|episode)\\D?0*${ep}(?:\\D|$)`, 'i');
         }
         const files = await getArchiveFiles(identifier);
+        if (files === null) {
+            complete = false;
+            continue;
+        }
         const subtitles = files
             .filter((f) => ACCEPTED_SUBTITLES.includes(f.name.slice(-3).toLowerCase()) && (f.name.match(regex) || f.name.match(epNameRegex)))
             .map((f) => ({ id: f.name, url: `https://archive.org/download/${identifier}/${f.name}`, lang: 'en' }));
@@ -339,42 +363,35 @@ async function buildSeriesStreams(id, log = { test: false, query: false }) {
             })
         );
     }
-    const response = { streams };
     if (log.test) {
         const identifier = streams?.[0]?.url?.split('/')?.[4] || '';
         console.log(`{"id": "${id}", "name": "${series.name}", "identifier": "${identifier}", "type": "series"}`);
     }
-    return response;
+    return { streams, complete };
 }
 
-async function fetchMovieStreams(id, log = { test: false, query: false }) {
+async function fetchStreams(cacheKey, builder) {
     increment('requests');
-    const cacheKey = `streams:movie:${id}`;
+    if (!CACHE_ENABLED) {
+        increment('cacheBypasses');
+        return rebuildResponse(cacheKey, builder);
+    }
     const cached = await getCachedResponse(cacheKey);
     if (cached) {
         increment('cacheHits');
-        maybeRevalidate(cacheKey, cached.cachedAt, () => buildMovieStreams(id, { test: false, query: false }));
+        maybeRevalidate(cacheKey, cached.cachedAt, builder);
         return cached.data;
     }
     increment('cacheMisses');
-    const response = await buildMovieStreams(id, log);
-    await storeResponse(cacheKey, response);
-    return response;
+    return rebuildResponse(cacheKey, builder);
 }
 
-async function fetchSeriesStreams(id, log = { test: false, query: false }) {
-    increment('requests');
-    const cacheKey = `streams:series:${id}`;
-    const cached = await getCachedResponse(cacheKey);
-    if (cached) {
-        increment('cacheHits');
-        maybeRevalidate(cacheKey, cached.cachedAt, () => buildSeriesStreams(id, { test: false, query: false }));
-        return cached.data;
-    }
-    increment('cacheMisses');
-    const response = await buildSeriesStreams(id, log);
-    await storeResponse(cacheKey, response);
-    return response;
+function fetchMovieStreams(id, log) {
+    return fetchStreams(`streams:movie:${id}`, () => buildMovieStreams(id, log));
+}
+
+function fetchSeriesStreams(id, log) {
+    return fetchStreams(`streams:series:${id}`, () => buildSeriesStreams(id, log));
 }
 
 module.exports = { fetchMovieStreams, fetchSeriesStreams };

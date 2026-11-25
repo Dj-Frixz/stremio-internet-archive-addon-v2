@@ -2,6 +2,7 @@ const metrics = {
     requests: 0,
     cacheHits: 0,
     cacheMisses: 0,
+    cacheBypasses: 0,
     upstreamErrors: 0,
 };
 

@@ -2,6 +2,7 @@ const http = require("http");
 const { getRouter } = require("stremio-addon-sdk");
 
 const addonInterface = require("./addon");
+const { CACHE_BACKEND } = require("./cache");
 const { renderLandingPage } = require("./landing-page");
 
 const router = getRouter(addonInterface);
@@ -26,6 +27,7 @@ const server = http.createServer((req, res) => {
 
 server.listen(port, () => {
 	console.log(`Stremio Internet Archive add-on listening on port ${port}`);
+	console.log(`[cache] ${CACHE_BACKEND}`);
 });
 
 // If you want this addon to appear in the addon catalogs, call .publishToCentral() with the publically available URL to your manifest

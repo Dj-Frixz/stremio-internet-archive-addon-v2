@@ -1,271 +1,419 @@
+const { Agent } = require('undici');
+const { cacheGet, cacheSet, CACHE_ENABLED } = require('./cache');
+const { schedule, deduped } = require('./request-manager');
+const { increment } = require('./metrics');
+
 const ACCEPTED_FILE_TYPES = ['avi', 'mp4', 'mkv', 'wmv', 'mov', 'm4v'];
 const ACCEPTED_SUBTITLES = ['srt', 'vtt', 'ass'];
 const MAX_STREAMS = 5;
-const MAX_STREAMS_SERIES = 3;
-// this function converts number of bytes to a string ending in MB or GB
-const sizeToString = bytes => bytes >= 1073741824 ? `${(bytes/1073741824).toFixed(1)}GB` : `${(bytes/1048576).toFixed(0)}MB`;
+const MAX_STREAMS_SERIES = 15;
+const MAX_PRECISE_SERIES_RESULTS = 3;
+const SOURCE_LABEL = process.env.STREAM_SOURCE_LABEL || 'Archive.org';
 
-function errorStream(err) {
-    // returns a Stream object to display the error
-    return [{
-        name: 'Internet Archive ' + err.name,
-        description: err.message + '\n at ' + err.stack?.match(/[\\\/]{1,2}([^\)\\\/]+)\)/)?.[1],
-        externalUrl: 'data:text/html,'+encodeURIComponent(err.stack)
-    }];
+const dispatcher = new Agent({
+    keepAliveTimeout: 10_000,
+    keepAliveMaxTimeout: 60_000,
+    connectTimeout: 15_000,
+});
+
+const DEFAULT_STREAM_TTL = Math.max(60, parseInt(process.env.CACHE_STREAM_TTL || '1800', 10));
+const NEGATIVE_CACHE_TTL = Math.max(30, parseInt(process.env.CACHE_NEGATIVE_TTL || '120', 10));
+const STALE_AFTER_MS = Math.max(0, parseInt(process.env.CACHE_STALE_AFTER_SECONDS || '900', 10) * 1000);
+const CACHE_TTL_JITTER = Math.max(0, parseFloat(process.env.CACHE_TTL_JITTER || '0.2'));
+const ARCHIVE_FILES_TTL = Math.max(300, parseInt(process.env.CACHE_ARCHIVE_FILES_TTL || '21600', 10));
+const ARCHIVE_FILES_EMPTY_TTL = Math.max(60, parseInt(process.env.CACHE_ARCHIVE_FILES_EMPTY_TTL || '600', 10));
+
+const refreshingKeys = new Set();
+
+const sizeToString = (bytes) => bytes >= 1073741824
+    ? `${(bytes / 1073741824).toFixed(1)}GB`
+    : `${(bytes / 1048576).toFixed(0)}MB`;
+
+const slugifyToken = (value = '') => value
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^A-Za-z0-9]+/g, '.')
+    .replace(/\.+/g, '.')
+    .replace(/^\.+|\.+$/g, '');
+
+const buildReleaseSlug = ({
+    title,
+    year,
+    season,
+    episode,
+    quality,
+    resolution,
+    codec,
+    extension,
+}) => {
+    const tokens = [];
+    const titleToken = slugifyToken(title);
+    if (titleToken) tokens.push(titleToken);
+    if (year) tokens.push(String(year));
+    if (season && episode) {
+        const s = String(season).padStart(2, '0');
+        const e = String(episode).padStart(2, '0');
+        tokens.push(`S${s}E${e}`);
+    }
+    if (quality) tokens.push(slugifyToken(quality).toUpperCase());
+    if (resolution) tokens.push(`${resolution}p`);
+    const codecToken = codec || extension;
+    if (codecToken) tokens.push(slugifyToken(codecToken).toUpperCase());
+    const slugBase = (tokens.filter(Boolean).join('.')) || slugifyToken(title || 'ArchiveOrg');
+    const ext = (extension || '').replace(/^\./, '');
+    return ext ? `${slugBase}.${ext}` : slugBase;
+};
+
+function formatStreamName(sourceTitle, qualityTag, fileMeta) {
+    const detailParts = [];
+    if (qualityTag) detailParts.push(qualityTag.trim().toUpperCase());
+    if (fileMeta?.height) detailParts.push(`${fileMeta.height}p`);
+    const fileFormat = (fileMeta?.format || fileMeta?.source || fileMeta?.name?.split('.').pop() || '').toUpperCase();
+    if (fileFormat) detailParts.push(fileFormat);
+    const suffix = detailParts.length ? ` • ${detailParts.join(' · ')}` : '';
+    let emoji = '📼';
+    if ((fileMeta?.height || 0) >= 2160) emoji = '🌌';
+    else if ((fileMeta?.height || 0) >= 1080) emoji = '🎞️';
+    else if ((fileMeta?.height || 0) >= 720) emoji = '📽️';
+    return `${emoji} ${SOURCE_LABEL} • ${sourceTitle}${suffix}`;
 }
 
-async function fetchMovieStreams(cinemetaID, log = {test:false, query:false}) {
-    let streams = [];
-
+async function limitedFetchJson(url, options = {}) {
     try {
-        const cinemetaUrls = [
-            `https://v3-cinemeta.strem.io/meta/movie/${cinemetaID}.json`,
-            `https://cinemeta-live.strem.io/meta/movie/${cinemetaID}.json`
-        ]
-        const cinemetaResponses = await Promise.all(cinemetaUrls.map(url => fetch(url)));
-        if (!cinemetaResponses[0].ok && !cinemetaResponses[1].ok) {
-            throw new Error("Cinemeta responded with codes",cinemetaResponses[0].status, cinemetaResponses[1].status);
-        }
-        const [film, altFilm] = await Promise.all(cinemetaResponses.map(res => res.ok ? res.json().then(data => data?.meta) : null));
-        const title = film.name.toLowerCase() // lowercase to avoid known ia bug with "TO" in title
-                               .replace(/^the /i,''); // i.e. include 'evil dead' for 'the evil dead'
-        const runtime = parseInt((film?.runtime || altFilm?.runtime)?.slice(0,-4) || 0) * 60; // typical runtime (in seconds)
-        if (runtime === 0) {
-            console.warn("Error: can't get runtime, set to zero. Movie:", film.name, cinemetaID);
-        }
-        const director_surname = (film.director?.[0] || '').split(' ').slice(-1)[0];
-        const year = (film?.year || altFilm?.releaseInfo) * 1; // cast to int
-        const queryParts = [
-            `(${director_surname} OR ${year} OR ${year-1} OR ${year+1})`, // director's surname or year (±1)
-            `title:(${title})`,
-            '-title:trailer', // exclude trailers
-            'mediatype:movies', // movies only
-            'item_size:["300000000" TO "100000000000"]' // size between ~300MB and ~100GB
-        ];
-        if (log.query) console.log(queryParts.join(' AND '));
-        const iaUrl = `https://archive.org/services/search/beta/page_production/?user_query=${encodeURIComponent(queryParts.join(' AND '))}&sort=week:desc&hits_per_page=${MAX_STREAMS}`;
-        // // console.log(iaUrl);
-        const iaResponse = await fetch(iaUrl);
-        if (!iaResponse.ok) {
-            throw new Error("Internet Archive responded with code "+iaResponse.status);
-        }
-        const iaData = await iaResponse.json();
-        const results = iaData?.response?.body?.hits?.hits || [];
-        // console.log(`Found ${results.length} results on IA for ${film.name} (${cinemetaID})`);
-        // let counter = 0;
-
-        for (const res of results) {
-            const id = res.fields.identifier;
-            const metaResponse = await fetch(`https://archive.org/metadata/${id}/files`);
-            if (!metaResponse.ok) {
-                throw new Error("Internet Archive metadata responded with code "+metaResponse.status);
+        return await schedule(async () => {
+            const res = await fetch(url, { dispatcher, signal: AbortSignal.timeout(20_000), ...options });
+            if (!res.ok) {
+                await res.body?.cancel();
+                throw new Error(`HTTP ${res.status}`);
             }
-            const files = (await metaResponse.json())?.result || [];
-    
-            // skip videos too short, likely not the full movie (require at least 70% of typical runtime)
-            const videoFiles = files.filter(f => ACCEPTED_FILE_TYPES.includes(f.name.slice(-3).toLowerCase()) && f.length > runtime*0.7);
-            if (videoFiles.length === 0) {
-                // console.log(` - ${id} has no acceptable video files, skipping`);
-                continue;
-            }
-
-            const subtitles = files
-                .filter(f => ACCEPTED_SUBTITLES.includes(f.name.slice(-3).toLowerCase()))
-                .map(f => ({id: f.name, url: `https://archive.org/download/${id}/${f.name}`, lang:'en'})); // lang en by default
-    
-            const quality = (res.fields.title+videoFiles[0].name+(res.fields.description||'')).match(/(?:dvd|blu-?ray|bd|hd|web|nd-?rip)-?(?:rip|dl)?|remux/i)?.[0] || '';
-
-            streams = streams.concat( // video files
-                videoFiles.map(f => ({
-                    url: `https://archive.org/download/${id}/${f.name}`,
-                    name: `Archive.org ${quality} ${f.height}p ${f.format}`,
-                    description: `${res.fields.title}\n${f.name}\n🎬 ${f.name.slice(-3).toLowerCase()} (${f.source})\n🕥 ${(f.length/60).toFixed(0)} min   💾 ${sizeToString(f.size)}`,
-                    subtitles: subtitles,
-                    behaviorHints: {
-                        notWebReady: f.name.slice(-3).toLowerCase() !== 'mp4', // mp4 is the only web-ready format
-                        videoSize: parseInt(f.size) || 0,
-                        filename: f.name
-                    }
-                }))
-            );
-    
-            // ADD IN THE FUTURE AN OPTION TO ENABLE TORRENTS
-            // const maxSize = Math.max(...videoFiles.map(f => f.size || 0));
-            // const maxSizeFile = videoFiles.find(f => f.size == maxSize);
-            // const maxSizeFileRes = maxSizeFile.height || Math.max(...videoFiles.map(f => f.height || 0));
-            // const maxSizeFileType = maxSizeFile.name.slice(-3).toLowerCase();
-            // streams = streams.concat( // torrents
-            //     files
-            //     .filter(f => f.name.slice(-7)==='torrent')
-            //     .map(f => ({
-            //         infoHash: f.btih, // BitTorrent info hash (probably)
-            //         name: `Archive.org ${quality} ${maxSizeFileRes!==0 ? maxSizeFileRes+'p' : ''} ${f.format}`,
-            //         description: `${res.fields.title}\n${f.name}\n🎬 ${maxSizeFileType} (archive torrent)\n🕥 ${(maxSizeFile.length/60).toFixed(0)} min   💾 ${sizeToString(maxSize)}`,
-            //         subtitles: subtitles,
-            //         behaviorHints: { // use the largest file as reference
-            //             videoSize: maxSize,
-            //             filename: files.find(f => f.size == maxSize)?.name
-            //         }
-            //     }))
-            // );
-            // console.log(` - ${id} (${streams.length - counter} streams)`);
-            // counter = streams.length;
-        }
-        // console.log(` -> Returning ${streams.length} streams`);
-        // // console.log(streams); // used for debugging
-        if (log.test) {
-            const identifier = streams?.[0]?.url?.split('/')?.[4] || '';
-            console.log(`{"id": "${cinemetaID}", "name": "${film.name}", "identifier": "${identifier}", "type": "movie"}`);
-        }
-        return { streams: streams }
+            return res.json();
+        });
     } catch (err) {
-        streams = errorStream(err); // return a stream result with the error
-        console.error('Error fetching movie '+cinemetaID+' ('+streams[0]?.description+')');
-    } finally {
-        return { streams: streams }
+        increment('upstreamErrors');
+        const { origin, pathname } = new URL(url);
+        console.warn('[fetch]', origin + pathname, err?.message || err);
+        return null;
     }
 }
 
-async function fetchSeriesStreams(cinemetaID, log = {test:false, query:false}) {
-    let streams = [];
-    try {
-        const [imdbId, season, ep] = cinemetaID.split(':');
-        const cinemetaUrl = `https://v3-cinemeta.strem.io/meta/series/${imdbId}.json`;
-        const cinemetaResponse = await fetch(cinemetaUrl);
-        if (!cinemetaResponse.ok) {
-            throw new Error("Cinemeta responded with code",cinemetaResponse);
+async function getCinemetaMeta(type, id, host = 'v3-cinemeta.strem.io') {
+    return deduped(`cinemeta:${host}:${type}:${id}`, async () => {
+        const json = await limitedFetchJson(`https://${host}/meta/${type}/${id}.json`);
+        return json?.meta || null;
+    });
+}
+
+async function searchArchive(queryKey, url) {
+    return deduped(`archive:search:${queryKey}`, async () => {
+        const json = await limitedFetchJson(url);
+        const hits = json?.response?.body?.hits?.hits;
+        return Array.isArray(hits) ? hits : null;
+    });
+}
+
+async function getArchiveFiles(identifier) {
+    const cacheKey = `archive:files:${identifier}`;
+    if (CACHE_ENABLED) {
+        const cached = await cacheGet(cacheKey);
+        if (cached) {
+            return cached;
         }
-        const series = (await cinemetaResponse.json())?.meta;
-        const sMatchName = series.name.toLowerCase().replace(/\W/g,'*');
-        const episode = series.videos.find(e => e.season == season && e.episode == ep);
-        const epName = (episode.name || episode.title).replace(/^the /i,'') // remove 'the' at start
-        .replace(/\W*part\W*[0-9IVX]+\W*/i,' ') // remove 'part x' from episode name
-        .replace(/\(.*\)/g,'') // remove anything in parentheses
-        // .replace(/[^a-z0-9]/g,'') // remove non-alphanumeric characters
-        .trim(); // remove leading/trailing spaces
-        // console.log(epName);
-        const sMatchNamePrecise = season==0 ? sMatchName +' '+ epName : sMatchName + `*season*${season}`;
-    
-        const queryParts = [
-            `title:"${sMatchNamePrecise}"`, // lowercase to avoid known ia bug with "TO" in title
-            '-title:(trailer OR trailers OR promo OR promos OR review OR reviews OR interview OR interviews)', // exclude
-            'mediatype:movies', // videos only ('movies' on archive.org includes TV shows)
-            '(series OR collection:(television OR unsorted_television OR opensource_movies))' // filter to TV shows only
-        ];
-        if (series.genres.includes('Soap')) {
-            const mmyyyy = (episode.name || episode.title).match(
-                /(january|february|march|april|may|june|july|august|september|october|november|december).*([12][90]\d{2})/i
-            );
-            queryParts[0] = mmyyyy ? `title:(${series.name.toLowerCase()} ${mmyyyy[1]} ${mmyyyy[2]})` : queryParts[0];
-            queryParts.pop(); // remove series/collection filter for soaps
-        }
-        if (log.query) console.log(queryParts.join(' AND '));
-        const iaUrl = `https://archive.org/services/search/beta/page_production/?user_query=${encodeURIComponent(queryParts.join(' AND '))}&hits_per_page=${MAX_STREAMS_SERIES}`;
-        // console.log(iaUrl);
-        const iaResponse = await fetch(iaUrl);
-        if (!iaResponse.ok) {
-            throw new Error("Internet Archive responded with code "+iaResponse.status);
-        }
-        const iaData = await iaResponse.json();
-        let results = iaData?.response?.body?.hits?.hits || [];
-        if (results.length === 0) { // try again with a more relaxed query
-            queryParts[0] = `title:("${sMatchName}" OR *${sMatchName}*)`; // try without season in title
-            if (log.query) console.log(queryParts.join(' AND '));
-            const iaUrlAlt = `https://archive.org/services/search/beta/page_production/?user_query=${encodeURIComponent(queryParts.join(' AND '))}&hits_per_page=${MAX_STREAMS_SERIES}`;
-            // console.log(iaUrlAlt);
-            const iaResponseAlt = await fetch(iaUrlAlt);
-            if (!iaResponseAlt.ok) {
-                throw new Error("Internet Archive responded with code "+iaResponseAlt.status);
-            }
-            const iaDataAlt = await iaResponseAlt.json();
-            results = iaDataAlt?.response?.body?.hits?.hits || [];
-        }
-        // console.log(`Found ${results.length} results on IA for ${series.name}, ${season}x${ep} (${imdbId})`);
-        // let counter = 0;
-        const epNameRegex = new RegExp('.*'+ // find ref to episode name in file names
-            epName.replace(/[^a-z0-9]/ig,'.*') + '.*','i');
-    
-        // console.log(epNameRegex);
-        for (const res of results) {
-            const id = res.fields.identifier;
-            let regex;
-            const wrongSeason = new RegExp(`(?:(?:^|[^a-z])s|season)\\D?0*(?!${season}(?:\\D|$))\\d+`,'i');
-    
-            if ((res.fields.title+id).match(wrongSeason)) continue; // wrong season, skip
-            else if ((res.fields.title+id).match(/season|[^a-z0-9]s[^a-z]?\d|^s[^a-z]?/i)) { // if archive includes one season only
-                regex = new RegExp(`(?:(?:^|[^a-z])ep?|episode)\\D?0*${ep}(?:\\D|$)`,'i'); // e.g. E05 or ep-5 or episode 5
-            } else {
-                regex = new RegExp(`s(?:eason)?\\D?0*${season}\\D*(?:ep?|episode)\\D?0*${ep}(?:\\D|$)`,'i'); // e.g. S01E05 or s1-e5
-            }
-            
-            const metaResponse = await fetch(`https://archive.org/metadata/${id}/files`);
-            const files = (await metaResponse.json())?.result || [];
-    
-            const videoFiles = files.filter(f => 
-                (f.name.match(regex) || f.name.match(epNameRegex))
-                && ACCEPTED_FILE_TYPES.includes(f.name.slice(-3).toLowerCase())
-                && f.name.slice(-7,-3)!=='.ia.'
-            );
-            
-            if (videoFiles.length === 0) {
-                // console.log(` - ${id} doesn't have S0${season}xE${ep}, skipping`);
-                continue;
-            }
-            
-            const subtitles = files
-                .filter(f => ACCEPTED_SUBTITLES.includes(f.name.slice(-3).toLowerCase())
-                             && (f.name.match(regex) || f.name.match(epNameRegex)))
-                .map(f => ({id: f.name, url: `https://archive.org/download/${id}/${f.name}`, lang:'en'})); // lang en by default
-    
-            const quality = (res.fields.title+videoFiles[0].name+(res.fields.description||'')).match(/(?:dvd|blu-?ray|bd|hd|web|nd-?rip)-?(?:rip|dl)?|remux/i)?.[0] || '';
-            streams = streams.concat( // video files
-                videoFiles.map(f => ({
-                    url: `https://archive.org/download/${id}/${f.name}`,
-                    name: `Archive.org ${quality} ${f.height}p ${f.format}`,
-                    description: `${res.fields.title}\n${f.name}\n🎬 ${f.name.slice(-3).toLowerCase()} (${f.source})\n🕥 ${(f.length/60).toFixed(0)} min   💾 ${sizeToString(f.size)}`,
-                    subtitles: subtitles,
-                    behaviorHints: {
-                        notWebReady: f.name.slice(-3).toLowerCase() !== 'mp4', // mp4 is the only web-ready format
-                        videoSize: parseInt(f.size) || 0,
-                        filename: f.name
-                    }
-                }))
-            );
-    
-            // ADD IN THE FUTURE AN OPTION TO ENABLE TORRENTS
-            // const maxSize = Math.max(...videoFiles.map(f => f.size || 0));
-            // const maxSizeFile = videoFiles.find(f => f.size == maxSize);
-            // const maxSizeFileRes = maxSizeFile.height || Math.max(...videoFiles.map(f => f.height || 0));
-            // const maxSizeFileType = maxSizeFile.name.slice(-3).toLowerCase();
-            // streams = streams.concat( // torrents
-            //     files
-            //     .filter(f => f.name.slice(-7)==='torrent')
-            //     .map(f => ({
-            //         infoHash: f.btih, // BitTorrent info hash (probably)
-            //         name: `Archive.org ${quality} ${maxSizeFileRes!==0 ? maxSizeFileRes+'p' : ''} ${f.format}`,
-            //         description: `${res.fields.title}\n${f.name}\n🎬 ${maxSizeFileType} (archive torrent)\n🕥 ${(maxSizeFile.length/60).toFixed(0)} min   💾 ${sizeToString(maxSize)}`,
-            //         subtitles: subtitles,
-            //         behaviorHints: { // use the largest file as reference
-            //             videoSize: maxSize,
-            //             filename: files.find(f => f.size == maxSize)?.name
-            //         }
-            //     }))
-            // );
-            // console.log(` - ${id} (${streams.length - counter} streams)`);
-            // counter = streams.length;
-        }
-        // console.log(` -> Returning ${streams.length} streams`);
-        // // console.log(streams); // used for debugging
-        if (log.test) {
-            const identifier = streams?.[0]?.url?.split('/')?.[4] || '';
-            console.log(`{"id": "${cinemetaID}", "name": "${series.name}", "identifier": "${identifier}", "type": "series"}`);
-        }
-    } catch (err) {
-        streams = errorStream(err); // return a stream result with the error
-        console.error('Error fetching series '+cinemetaID+' ('+streams[0]?.description+')');
-    } finally {
-        return { streams: streams };
     }
+    return deduped(`archive:files:${identifier}`, async () => {
+        const json = await limitedFetchJson(`https://archive.org/metadata/${identifier}/files`);
+        const files = json?.result;
+        if (!Array.isArray(files)) return null;
+        if (CACHE_ENABLED) {
+            await cacheSet(cacheKey, files, files.length ? ARCHIVE_FILES_TTL : ARCHIVE_FILES_EMPTY_TTL);
+        }
+        return files;
+    });
+}
+
+function ttlForPayload(payload) {
+    return (payload?.streams?.length || 0) > 0 ? DEFAULT_STREAM_TTL : NEGATIVE_CACHE_TTL;
+}
+
+function jitter(ttl) {
+    if (!CACHE_ENABLED || CACHE_TTL_JITTER <= 0) return ttl;
+    const delta = ttl * CACHE_TTL_JITTER;
+    const min = ttl - delta / 2;
+    return Math.max(1, Math.round(min + Math.random() * delta));
+}
+
+async function getCachedResponse(cacheKey) {
+    if (!CACHE_ENABLED) return null;
+    const entry = await cacheGet(cacheKey);
+    if (!entry) return null;
+    if (entry.data) {
+        return entry;
+    }
+    return { data: entry, cachedAt: entry.cachedAt || 0 };
+}
+
+async function storeResponse(cacheKey, payload) {
+    if (!CACHE_ENABLED) return;
+    const ttl = jitter(ttlForPayload(payload));
+    await cacheSet(cacheKey, { data: payload, cachedAt: Date.now() }, ttl);
+}
+
+function rebuildResponse(cacheKey, builder) {
+    return deduped(`build:${cacheKey}`, async () => {
+        const { streams, complete } = await builder();
+        const response = { streams };
+        if (complete) await storeResponse(cacheKey, response);
+        return response;
+    });
+}
+
+function maybeRevalidate(cacheKey, cachedAt, builder) {
+    if (!CACHE_ENABLED || !cachedAt || STALE_AFTER_MS === 0) return;
+    if (Date.now() - cachedAt < STALE_AFTER_MS) return;
+    if (refreshingKeys.has(cacheKey)) return;
+    refreshingKeys.add(cacheKey);
+    setImmediate(async () => {
+        try {
+            await rebuildResponse(cacheKey, builder);
+        } catch (err) {
+            console.warn('[cache] background refresh failed for', cacheKey, err?.message || err);
+        } finally {
+            refreshingKeys.delete(cacheKey);
+        }
+    });
+}
+
+async function buildMovieStreams(imdbId, log = { test: false, query: false }) {
+    const primaryFilm = await getCinemetaMeta('movie', imdbId);
+    const fallbackFilm = primaryFilm?.name && primaryFilm.runtime && primaryFilm.year
+        ? null
+        : await getCinemetaMeta('movie', imdbId, 'cinemeta-live.strem.io');
+    const film = primaryFilm?.name ? primaryFilm : fallbackFilm;
+    if (!film?.name) {
+        return { streams: [], complete: false };
+    }
+    const title = film.name.toLowerCase().replace(/^the /i, '');
+    const runtimeMinutes = parseInt(film.runtime, 10) || parseInt(fallbackFilm?.runtime, 10) || 0;
+    const runtimeSeconds = runtimeMinutes * 60;
+    if (!runtimeSeconds) {
+        console.warn("Error: can't get runtime, set to zero.");
+    }
+    const directorSurname = (film.director?.[0] || '').split(' ').slice(-1)[0];
+    const year = parseInt(film.year, 10)
+        || parseInt(fallbackFilm?.year || fallbackFilm?.releaseInfo, 10)
+        || 0;
+    const queryParts = [
+        `(${directorSurname} OR ${year} OR ${year - 1} OR ${year + 1})`,
+        `title:(${title})`,
+        '-title:trailer',
+        'mediatype:movies',
+        'item_size:["300000000" TO "100000000000"]',
+    ];
+    if (log.query) console.log(queryParts.join(' AND '));
+    const iaUrl = `https://archive.org/services/search/beta/page_production/?user_query=${encodeURIComponent(queryParts.join(' AND '))}&sort=week:desc&hits_per_page=${MAX_STREAMS}`;
+    const results = await searchArchive(`movie:${imdbId}`, iaUrl);
+    if (results === null) return { streams: [], complete: false };
+    const streams = [];
+    let complete = true;
+    for (const res of results) {
+        const identifier = res.fields.identifier;
+        const files = await getArchiveFiles(identifier);
+        if (files === null) {
+            complete = false;
+            continue;
+        }
+        const subtitles = files
+            .filter((f) => ACCEPTED_SUBTITLES.includes(f.name.slice(-3).toLowerCase()))
+            .map((f) => ({ id: f.name, url: `https://archive.org/download/${identifier}/${f.name}`, lang: 'en' }));
+        const videoFiles = files.filter((f) => ACCEPTED_FILE_TYPES.includes(f.name.slice(-3).toLowerCase()) && f.length > runtimeSeconds * 0.7);
+        if (videoFiles.length === 0) {
+            continue;
+        }
+        const quality = (res.fields.title + videoFiles[0].name + (res.fields.description || ''))
+            .match(/(?:dvd|blu-?ray|bd|hd|web|nd-?rip)-?(?:rip|dl)?|remux/i)?.[0] || '';
+        streams.push(
+            ...videoFiles.map((f) => {
+                const extension = (f.name.split('.').pop() || '').toLowerCase();
+                const isWebReady = extension === 'mp4';
+                const sizeBytes = parseInt(f.size, 10) || 0;
+                const releaseSlug = buildReleaseSlug({
+                    title: res.fields.title || film.name,
+                    year,
+                    quality,
+                    resolution: f.height || undefined,
+                    codec: f.format || f.source || undefined,
+                    extension,
+                });
+                const sourceInfo = f.source ? ` (${f.source})` : '';
+                const detailLines = [
+                    res.fields.title,
+                    f.name !== releaseSlug ? `Source file: ${f.name}` : '',
+                    `🎬 ${extension || 'file'}${sourceInfo}`,
+                    `🕥 ${(f.length / 60).toFixed(0)} min   💾 ${sizeToString(sizeBytes)}`,
+                ].filter(Boolean);
+                return {
+                    url: `https://archive.org/download/${identifier}/${f.name}`,
+                    name: formatStreamName(res.fields.title || film.name, quality, f),
+                    description: [releaseSlug, ...detailLines].join('\n'),
+                    subtitles,
+                    behaviorHints: {
+                        notWebReady: !isWebReady,
+                        videoSize: sizeBytes,
+                        filename: releaseSlug,
+                    },
+                };
+            })
+        );
+    }
+    if (log.test) {
+        const identifier = streams?.[0]?.url?.split('/')?.[4] || '';
+        console.log(`{"id": "${imdbId}", "name": "${film.name}", "identifier": "${identifier}", "type": "movie"}`);
+    }
+    return { streams, complete };
+}
+
+async function buildSeriesStreams(id, log = { test: false, query: false }) {
+    const [imdbId, season, ep] = id.split(':');
+    const series = await getCinemetaMeta('series', imdbId);
+    if (!series) {
+        return { streams: [], complete: false };
+    }
+    const sMatchName = series.name.toLowerCase().replace(/\W/g, '*');
+    const episode = series.videos?.find((e) => e.season == season && e.episode == ep);
+    if (!episode) {
+        return { streams: [], complete: true };
+    }
+    const epName = (episode.name || episode.title)
+        .replace(/^the /i, '')
+        .replace(/\W*part\W*[0-9IVX]+\W*/i, ' ')
+        .replace(/\(.*\)/g, '')
+        .trim();
+    const broadTitle = `title:("${sMatchName}" OR *${sMatchName}*)`;
+    const preciseName = Number(season) === 0 ? `${sMatchName} ${epName}` : `${sMatchName}*season*${season}`;
+    const queryParts = [
+        `title:"${preciseName}"`,
+        '-title:(trailer OR trailers OR promo OR promos OR review OR reviews OR interview OR interviews)',
+        'mediatype:movies',
+        '(series OR collection:(television OR unsorted_television OR opensource_movies))',
+    ];
+    if ((series.genres || []).includes('Soap')) {
+        const mmyyyy = (episode.name || episode.title).match(/(january|february|march|april|may|june|july|august|september|october|november|december).*([12][90]\d{2})/i);
+        queryParts[0] = mmyyyy ? `title:(${series.name.toLowerCase()} ${mmyyyy[1]} ${mmyyyy[2]})` : queryParts[0];
+        queryParts.pop();
+    }
+    const search = async (limit) => {
+        const query = queryParts.join(' AND ');
+        if (log.query) console.log(query);
+        const url = `https://archive.org/services/search/beta/page_production/?user_query=${encodeURIComponent(query)}&hits_per_page=${limit}`;
+        const results = await searchArchive(`series:${url}`, url);
+        if (results === null) return { streams: [], complete: false };
+        return collectEpisodeStreams(results, series, season, ep, epName);
+    };
+    let response = await search(MAX_PRECISE_SERIES_RESULTS);
+    if (response.complete && response.streams.length === 0) {
+        queryParts[0] = broadTitle;
+        response = await search(MAX_STREAMS_SERIES);
+    }
+    if (log.test) {
+        const identifier = response.streams[0]?.url?.split('/')?.[4] || '';
+        console.log(`{"id": "${id}", "name": "${series.name}", "identifier": "${identifier}", "type": "series"}`);
+    }
+    return response;
+}
+
+async function collectEpisodeStreams(results, series, season, ep, epName) {
+    const seasonNumber = parseInt(season, 10) || undefined;
+    const episodeNumber = parseInt(ep, 10) || undefined;
+    const epNameRegex = new RegExp('.*' + epName.replace(/[^a-z0-9]/gi, '.*') + '.*', 'i');
+    const streams = [];
+    let complete = true;
+    for (const res of results) {
+        const identifier = res.fields.identifier;
+        const wrongSeason = new RegExp(`(?:(?:^|[^a-z])s|season)\\D?0*(?!${season}(?:\\D|$))\\d+`, 'i');
+        if ((res.fields.title + identifier).match(wrongSeason)) continue;
+        let regex;
+        if ((res.fields.title + identifier).match(/season|[^a-z0-9]s[^a-z]?\d|^s[^a-z]?/i)) {
+            regex = new RegExp(`(?:(?:^|[^a-z])ep?|episode)\\D?0*${ep}(?:\\D|$)`, 'i');
+        } else {
+            regex = new RegExp(`s(?:eason)?\\D?0*${season}\\D*(?:ep?|episode)\\D?0*${ep}(?:\\D|$)`, 'i');
+        }
+        const files = await getArchiveFiles(identifier);
+        if (files === null) {
+            complete = false;
+            continue;
+        }
+        const subtitles = files
+            .filter((f) => ACCEPTED_SUBTITLES.includes(f.name.slice(-3).toLowerCase()) && (f.name.match(regex) || f.name.match(epNameRegex)))
+            .map((f) => ({ id: f.name, url: `https://archive.org/download/${identifier}/${f.name}`, lang: 'en' }));
+        const videoFiles = files.filter((f) =>
+            (f.name.match(regex) || f.name.match(epNameRegex))
+            && ACCEPTED_FILE_TYPES.includes(f.name.slice(-3).toLowerCase())
+            && f.name.slice(-7, -3) !== '.ia.'
+        );
+        if (videoFiles.length === 0) {
+            continue;
+        }
+        const quality = (res.fields.title + videoFiles[0].name + (res.fields.description || ''))
+            .match(/(?:dvd|blu-?ray|bd|hd|web|nd-?rip)-?(?:rip|dl)?|remux/i)?.[0] || '';
+        streams.push(
+            ...videoFiles.map((f) => {
+                const extension = (f.name.split('.').pop() || '').toLowerCase();
+                const isWebReady = extension === 'mp4';
+                const sizeBytes = parseInt(f.size, 10) || 0;
+                const releaseSlug = buildReleaseSlug({
+                    title: res.fields.title || series.name,
+                    year: series.year,
+                    season: seasonNumber,
+                    episode: episodeNumber,
+                    quality,
+                    resolution: f.height || undefined,
+                    codec: f.format || f.source || undefined,
+                    extension,
+                });
+                const sourceInfo = f.source ? ` (${f.source})` : '';
+                const detailLines = [
+                    res.fields.title,
+                    f.name !== releaseSlug ? `Source file: ${f.name}` : '',
+                    `🎬 ${extension || 'file'}${sourceInfo}`,
+                    `🕥 ${(f.length / 60).toFixed(0)} min   💾 ${sizeToString(sizeBytes)}`,
+                ].filter(Boolean);
+                return {
+                    url: `https://archive.org/download/${identifier}/${f.name}`,
+                    name: formatStreamName(res.fields.title || series.name, quality, f),
+                    description: [releaseSlug, ...detailLines].join('\n'),
+                    subtitles,
+                    behaviorHints: {
+                        notWebReady: !isWebReady,
+                        videoSize: sizeBytes,
+                        filename: releaseSlug,
+                    },
+                };
+            })
+        );
+    }
+    return { streams, complete };
+}
+
+async function fetchStreams(cacheKey, builder) {
+    increment('requests');
+    if (!CACHE_ENABLED) {
+        increment('cacheBypasses');
+        return rebuildResponse(cacheKey, builder);
+    }
+    const cached = await getCachedResponse(cacheKey);
+    if (cached) {
+        increment('cacheHits');
+        maybeRevalidate(cacheKey, cached.cachedAt, builder);
+        return cached.data;
+    }
+    increment('cacheMisses');
+    return rebuildResponse(cacheKey, builder);
+}
+
+function fetchMovieStreams(id, log) {
+    return fetchStreams(`streams:movie:${id}`, () => buildMovieStreams(id, log));
+}
+
+function fetchSeriesStreams(id, log) {
+    return fetchStreams(`streams:series:${id}`, () => buildSeriesStreams(id, log));
 }
 
 module.exports = { fetchMovieStreams, fetchSeriesStreams };
